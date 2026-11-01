@@ -1,7 +1,6 @@
 import argparse
 import requests
 import logging
-from bs4 import BeautifulSoup
 import re
 import sys
 from urllib.parse import urlparse
@@ -27,6 +26,7 @@ class VerboseErrorPageDetector:
         self.timeout = timeout
         self.user_agent = user_agent if user_agent else "vscan-verbose-error-page-detector/1.0"
         self.headers = {'User-Agent': self.user_agent}
+        self.last_status = None
         self.sensitive_patterns = [
             re.compile(r"Stack Trace", re.IGNORECASE),
             re.compile(r"Exception Details", re.IGNORECASE),
@@ -38,10 +38,18 @@ class VerboseErrorPageDetector:
             re.compile(r"Fatal error:", re.IGNORECASE),
             re.compile(r"Internal Server Error", re.IGNORECASE),
             re.compile(r"The server encountered an internal error or misconfiguration", re.IGNORECASE),
-            re.compile(r"debug", re.IGNORECASE),
-            re.compile(r"database", re.IGNORECASE),
-            re.compile(r"path", re.IGNORECASE),
-            re.compile(r"version", re.IGNORECASE),
+            # Error shaped markers only. Bare words such as debug,
+            # database, path, or version appear on ordinary pages and
+            # are not findings on their own.
+            re.compile(r"Traceback \(most recent call last\)"),
+            re.compile(r"File \"[^\"]+\", line \d+"),
+            re.compile(r"\bat [\w.$]+\([\w.]+:\d+\)"),
+            re.compile(r"\b[A-Z][A-Za-z]*Exception\b"),
+            re.compile(r"SQLSTATE\[", re.IGNORECASE),
+            re.compile(r"ORA-\d{5}"),
+            re.compile(r"Uncaught (Error|Exception)", re.IGNORECASE),
+            re.compile(r"phpinfo\(\)"),
+            re.compile(r"DOCUMENT_ROOT|SERVER_ADMIN|SCRIPT_FILENAME"),
         ]
 
     def is_valid_url(self):
@@ -66,7 +74,10 @@ class VerboseErrorPageDetector:
         """
         try:
             response = requests.get(self.url, headers=self.headers, timeout=self.timeout)
-            response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+            # No raise_for_status: verbose error pages are served with
+            # 4xx and 5xx status codes, and the body of an error
+            # response is exactly what this check exists to read.
+            self.last_status = response.status_code
             return response.text
         except requests.exceptions.RequestException as e:
             logging.error(f"Error fetching {self.url}: {e}")
@@ -95,16 +106,19 @@ class VerboseErrorPageDetector:
         Executes the verbose error page detection.
 
         Returns:
-            bool: True if a verbose error page is detected, False otherwise.
+            bool or None: True if a verbose error page is detected,
+            False if a page was fetched and held no markers, and None
+            when nothing was fetched, so a failed scan is never folded
+            into a clean verdict.
         """
 
         if not self.is_valid_url():
             logging.error(f"Invalid URL: {self.url}")
-            return False
+            return None
 
         content = self.fetch_page()
 
-        if content:
+        if content is not None:
             if self.analyze_content(content):
                 logging.warning(f"Potential verbose error page detected at: {self.url}")
                 return True
@@ -112,7 +126,7 @@ class VerboseErrorPageDetector:
                 logging.info(f"No sensitive information found at: {self.url}")
                 return False
         else:
-            return False
+            return None
 
 
 def setup_argparse():
@@ -137,7 +151,11 @@ def main():
     args = parser.parse_args()
 
     detector = VerboseErrorPageDetector(args.url, args.timeout, args.user_agent)
-    if detector.run():
+    result = detector.run()
+    if result is None:
+        print(f"Scan failed: {args.url} could not be fetched, so no verdict was reached.")
+        sys.exit(1)
+    if result:
         print(f"Potential verbose error page detected at: {args.url}")
     else:
         print(f"No verbose error page detected at: {args.url}")
