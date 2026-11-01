@@ -61,6 +61,10 @@ class VerboseErrorPageDetector:
         """
         try:
             result = urlparse(self.url)
+            # Any scheme with a netloc counts as valid. A scheme requests does
+            # not support raises inside fetch_page as an exception type the
+            # handler there does not catch, so it escapes run entirely instead
+            # of becoming the None verdict the design promises.
             return all([result.scheme, result.netloc])
         except:
             return False
@@ -77,6 +81,9 @@ class VerboseErrorPageDetector:
             # No raise_for_status: verbose error pages are served with
             # 4xx and 5xx status codes, and the body of an error
             # response is exactly what this check exists to read.
+            # last_status is stored and then never used. A 200 page whose text
+            # mentions an internal server error as prose scores exactly like a
+            # genuine 500 error page, because the verdict reads the body only.
             self.last_status = response.status_code
             return response.text
         except requests.exceptions.RequestException as e:
@@ -96,6 +103,10 @@ class VerboseErrorPageDetector:
         if not content:
             return False
 
+        # The scan stops at the first matching pattern and records nothing
+        # about which one it was. A page flagged for the words Warning: and
+        # a page leaking a full stack trace produce the same single line of
+        # output, so triage starts from zero either way.
         for pattern in self.sensitive_patterns:
             if pattern.search(content):
                 return True
@@ -150,6 +161,9 @@ def main():
     parser = setup_argparse()
     args = parser.parse_args()
 
+    # The timeout argument is never checked before it is used. A negative
+    # value reaches requests, which raises a plain ValueError, outside
+    # every handler in this file, and the run ends in a traceback.
     detector = VerboseErrorPageDetector(args.url, args.timeout, args.user_agent)
     result = detector.run()
     if result is None:
