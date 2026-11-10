@@ -61,12 +61,8 @@ class VerboseErrorPageDetector:
         """
         try:
             result = urlparse(self.url)
-            # Any scheme with a netloc counts as valid. A scheme requests does
-            # not support raises inside fetch_page as an exception type the
-            # handler there does not catch, so it escapes run entirely instead
-            # of becoming the None verdict the design promises.
-            return all([result.scheme, result.netloc])
-        except:
+            return result.scheme in ("http", "https") and bool(result.netloc)
+        except Exception:
             return False
 
     def fetch_page(self):
@@ -100,17 +96,20 @@ class VerboseErrorPageDetector:
         Returns:
             bool: True if sensitive information is found, False otherwise.
         """
-        if not content:
-            return False
+        return self.find_match(content) is not None
 
-        # The scan stops at the first matching pattern and records nothing
-        # about which one it was. A page flagged for the words Warning: and
-        # a page leaking a full stack trace produce the same single line of
-        # output, so triage starts from zero either way.
+    def find_match(self, content):
+        """
+        Returns the text of the first sensitive pattern found in the
+        content, or None when no pattern matches, so a report can name
+        what actually matched instead of only giving a bare verdict.
+        """
+        if not content:
+            return None
         for pattern in self.sensitive_patterns:
             if pattern.search(content):
-                return True
-        return False
+                return pattern.pattern
+        return None
 
     def run(self):
         """
@@ -130,8 +129,9 @@ class VerboseErrorPageDetector:
         content = self.fetch_page()
 
         if content is not None:
-            if self.analyze_content(content):
-                logging.warning(f"Potential verbose error page detected at: {self.url}")
+            matched = self.find_match(content)
+            if matched is not None:
+                logging.warning(f"Potential verbose error page detected at: {self.url} (HTTP {self.last_status}, matched pattern: {matched})")
                 return True
             else:
                 logging.info(f"No sensitive information found at: {self.url}")
@@ -161,9 +161,10 @@ def main():
     parser = setup_argparse()
     args = parser.parse_args()
 
-    # The timeout argument is never checked before it is used. A negative
-    # value reaches requests, which raises a plain ValueError, outside
-    # every handler in this file, and the run ends in a traceback.
+    if args.timeout <= 0:
+        logging.error("Timeout must be a positive number of seconds.")
+        sys.exit(1)
+
     detector = VerboseErrorPageDetector(args.url, args.timeout, args.user_agent)
     result = detector.run()
     if result is None:
